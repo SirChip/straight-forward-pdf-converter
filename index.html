@@ -188,6 +188,9 @@
             position: relative;
             overflow: auto;
             margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
         
         .pdf-page {
@@ -206,6 +209,7 @@
             border: 1px dashed transparent;
             padding: 2px;
             outline: none;
+            z-index: 10;
         }
         
         .text-element:hover {
@@ -272,6 +276,45 @@
             text-align: center;
         }
         
+        .error-message {
+            color: #e53e3e;
+            background: #fed7d7;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 15px 0;
+            display: none;
+            text-align: center;
+        }
+        
+        .pdf-canvas {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .page-controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .page-btn {
+            background: #4285f4;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        .page-info {
+            font-size: 16px;
+            color: #4a5568;
+        }
+        
         @media (max-width: 768px) {
             .container {
                 padding: 20px;
@@ -293,7 +336,11 @@
             }
         }
     </style>
+    <!-- PDF-Lib for creating and modifying PDFs -->
     <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <!-- PDF.js for rendering PDFs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+    <!-- Download.js for file downloads -->
     <script src="https://unpkg.com/downloadjs@1.4.7"></script>
 </head>
 <body>
@@ -303,6 +350,8 @@
         <div class="instructions">
             <p>Upload a PDF to edit, or convert images/text files to PDF and then edit them. Click anywhere on the PDF to add text, or select existing text to edit.</p>
         </div>
+        
+        <div class="error-message" id="errorMessage"></div>
         
         <div class="upload-section" id="uploadSection">
             <div class="drop-zone" id="dropZone">
@@ -321,6 +370,16 @@
         </div>
         
         <div class="editor-section" id="editorSection">
+            <div class="page-controls" id="pageControls" style="display: none;">
+                <button class="page-btn" onclick="changePage(-1)">
+                    <i class="fas fa-chevron-left"></i> Previous
+                </button>
+                <span class="page-info" id="pageInfo">Page 1 of 1</span>
+                <button class="page-btn" onclick="changePage(1)">
+                    Next <i class="fas fa-chevron-right"></i>
+                </button>
+            </div>
+            
             <div class="editor-toolbar">
                 <div class="toolbar-group">
                     <button class="toolbar-btn" onclick="addTextBox()" title="Add Text">
@@ -355,8 +414,7 @@
             </div>
             
             <div class="pdf-editor" id="pdfEditor">
-                <!-- PDF content will be displayed here -->
-                <canvas id="pdfCanvas"></canvas>
+                <canvas id="pdfCanvas" class="pdf-canvas"></canvas>
             </div>
             
             <div class="action-buttons">
@@ -375,14 +433,20 @@
     </div>
 
     <script>
+        // Set PDF.js worker path
+        pdfjsLib = window['pdfjs-dist/build/pdf'];
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+        
         let currentPdfDoc = null;
+        let currentPdfJsDoc = null;
         let currentFile = null;
         let textElements = [];
         let selectedElement = null;
         let isBold = false;
         let isItalic = false;
-        let currentPage = 0;
         let scale = 1.5;
+        let currentPage = 1;
+        let totalPages = 1;
         let canvas = document.getElementById('pdfCanvas');
         let ctx = canvas.getContext('2d');
         
@@ -417,6 +481,7 @@
             
             currentFile = file;
             showProgress();
+            hideError();
             
             try {
                 if (file.type === 'application/pdf') {
@@ -424,12 +489,12 @@
                 } else if (file.type.startsWith('image/') || file.type === 'text/plain') {
                     await convertAndLoad(file);
                 } else {
-                    throw new Error('Unsupported file type');
+                    throw new Error('Unsupported file type. Please use PDF, images (JPG, PNG, WEBP) or text files.');
                 }
                 
                 showEditor();
             } catch (error) {
-                alert('Error loading file: ' + error.message);
+                showError('Error loading file: ' + error.message);
                 console.error(error);
             }
             
@@ -437,9 +502,34 @@
         }
         
         async function loadPDF(file) {
-            const arrayBuffer = await file.arrayBuffer();
-            currentPdfDoc = await PDFLib.PDFDocument.load(arrayBuffer);
-            await renderPDF();
+            try {
+                // For PDF files, we need to use both pdf-lib and pdf.js
+                const arrayBuffer = await file.arrayBuffer();
+                
+                // Load with pdf-lib for editing
+                currentPdfDoc = await PDFLib.PDFDocument.load(arrayBuffer);
+                
+                // Load with pdf.js for rendering
+                const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+                currentPdfJsDoc = await loadingTask.promise;
+                totalPages = currentPdfJsDoc.numPages;
+                
+                // Show page controls if PDF has multiple pages
+                if (totalPages > 1) {
+                    document.getElementById('pageControls').style.display = 'flex';
+                    document.getElementById('pageInfo').textContent = `Page ${currentPage} of ${totalPages}`;
+                }
+                
+                await renderPDF();
+            } catch (error) {
+                // If PDF loading fails, try converting it as an image
+                if (error.message.includes('index') && error.message.includes('at most')) {
+                    console.log('PDF loading failed, attempting to convert as image');
+                    await convertAndLoad(file);
+                } else {
+                    throw error;
+                }
+            }
         }
         
         async function convertAndLoad(file) {
@@ -447,6 +537,8 @@
                 await convertImageToPDF(file);
             } else if (file.type === 'text/plain') {
                 await convertTextToPDF(file);
+            } else {
+                throw new Error('Unsupported file type for conversion');
             }
             await renderPDF();
         }
@@ -457,10 +549,23 @@
             const page = currentPdfDoc.addPage([600, 800]);
             
             let image;
-            if (file.type === 'image/png') {
-                image = await currentPdfDoc.embedPng(imageBytes);
-            } else {
-                image = await currentPdfDoc.embedJpg(imageBytes);
+            try {
+                if (file.type === 'image/png') {
+                    image = await currentPdfDoc.embedPng(imageBytes);
+                } else {
+                    image = await currentPdfDoc.embedJpg(imageBytes);
+                }
+            } catch (error) {
+                // If image embedding fails, try the other format
+                try {
+                    image = await currentPdfDoc.embedJpg(imageBytes);
+                } catch (e) {
+                    try {
+                        image = await currentPdfDoc.embedPng(imageBytes);
+                    } catch (err) {
+                        throw new Error('Failed to process the image file. It may be corrupted or in an unsupported format.');
+                    }
+                }
             }
             
             const { width, height } = page.getSize();
@@ -482,6 +587,12 @@
                 width: finalWidth,
                 height: finalHeight,
             });
+            
+            // Create a simple PDF.js document for rendering
+            const pdfBytes = await currentPdfDoc.save();
+            const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
+            currentPdfJsDoc = await loadingTask.promise;
+            totalPages = currentPdfJsDoc.numPages;
         }
         
         async function convertTextToPDF(file) {
@@ -513,39 +624,60 @@
                 }
                 y -= 20;
             }
+            
+            // Create a simple PDF.js document for rendering
+            const pdfBytes = await currentPdfDoc.save();
+            const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
+            currentPdfJsDoc = await loadingTask.promise;
+            totalPages = currentPdfJsDoc.numPages;
         }
         
         async function renderPDF() {
             const pdfEditor = document.getElementById('pdfEditor');
+            // Clear previous content but keep the canvas
+            const canvas = document.getElementById('pdfCanvas');
             pdfEditor.innerHTML = '';
-            textElements = [];
-            
-            // Create canvas for PDF rendering
-            canvas = document.createElement('canvas');
-            canvas.id = 'pdfCanvas';
-            canvas.style.display = 'block';
-            canvas.style.margin = '0 auto';
-            canvas.style.border = '1px solid #ddd';
             pdfEditor.appendChild(canvas);
+            
+            textElements = [];
             
             ctx = canvas.getContext('2d');
             
-            // Render the first page
-            const page = await currentPdfDoc.getPage(currentPage);
-            const viewport = page.getViewport({ scale: scale });
-            
-            canvas.height = viewport.height;
-            canvas.width = viewport.width;
-            
-            const renderContext = {
-                canvasContext: ctx,
-                viewport: viewport
-            };
-            
-            await page.render(renderContext).promise;
-            
-            // Add click listener for adding text
-            canvas.addEventListener('click', handleCanvasClick);
+            try {
+                // Get the page using PDF.js
+                const page = await currentPdfJsDoc.getPage(currentPage);
+                const viewport = page.getViewport({ scale: scale });
+                
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+                
+                const renderContext = {
+                    canvasContext: ctx,
+                    viewport: viewport
+                };
+                
+                await page.render(renderContext).promise;
+                
+                // Update page info
+                document.getElementById('pageInfo').textContent = `Page ${currentPage} of ${totalPages}`;
+                
+                // Add click listener for adding text
+                canvas.addEventListener('click', handleCanvasClick);
+            } catch (error) {
+                if (error.message.includes('index') && error.message.includes('at most')) {
+                    throw new Error('The PDF appears to be empty or corrupted. Please try a different file.');
+                } else {
+                    throw error;
+                }
+            }
+        }
+        
+        function changePage(direction) {
+            const newPage = currentPage + direction;
+            if (newPage > 0 && newPage <= totalPages) {
+                currentPage = newPage;
+                renderPDF();
+            }
         }
         
         function handleCanvasClick(e) {
@@ -653,9 +785,10 @@
             try {
                 // Create a new PDF with the text overlays
                 const newPdfDoc = await PDFLib.PDFDocument.create();
-                const pages = currentPdfDoc.getPages();
                 
-                for (let i = 0; i < pages.length; i++) {
+                // Copy all pages from the original PDF
+                const pageCount = currentPdfDoc.getPageCount();
+                for (let i = 0; i < pageCount; i++) {
                     const [existingPage] = await newPdfDoc.copyPages(currentPdfDoc, [i]);
                     const newPage = newPdfDoc.addPage(existingPage);
                     
@@ -688,7 +821,7 @@
                 download(blob, (currentFile ? currentFile.name.replace(/\.[^/.]+$/, "") : 'document') + '_edited.pdf', 'application/pdf');
                 
             } catch (error) {
-                alert('Error generating PDF: ' + error.message);
+                showError('Error generating PDF: ' + error.message);
                 console.error(error);
             }
             
@@ -699,7 +832,7 @@
             textElements.forEach(el => el.remove());
             textElements = [];
             selectedElement = null;
-            if (currentPdfDoc) {
+            if (currentPdfJsDoc) {
                 renderPDF();
             }
         }
@@ -729,6 +862,16 @@
                     document.getElementById('progressBar').style.width = '0%';
                 }, 500);
             }, 500);
+        }
+        
+        function showError(message) {
+            const errorElement = document.getElementById('errorMessage');
+            errorElement.textContent = message;
+            errorElement.style.display = 'block';
+        }
+        
+        function hideError() {
+            document.getElementById('errorMessage').style.display = 'none';
         }
         
         // Utility functions
@@ -769,4 +912,4 @@
         });
     </script>
 </body>
-                    </html>
+    </html>
